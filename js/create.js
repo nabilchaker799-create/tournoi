@@ -1,7 +1,7 @@
 import { sb, state, requireLogin } from './supabase.js';
 import { $, $$, esc, errMsg, toast, TIKTOK_RE } from './components.js';
 
-const SIZES = [2, 4, 8, 16, 32, 64];
+const SIZES = [2, 4, 8, 16, 32, 64, 128];
 const MAX_IMG = 5 * 1024 * 1024;          // 5 Mo
 const MAX_IMGS_PER_CHAR = 8;
 const OK_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
