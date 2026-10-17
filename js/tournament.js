@@ -13,6 +13,7 @@ function roundName(r, total) {
   if (left === 3) return 'Huitièmes de finale';
   if (left === 4) return 'Seizièmes de finale';
   if (left === 5) return '32es de finale';
+  if (left === 6) return '64es de finale';
   return `Round ${r}`;
 }
 
@@ -175,7 +176,7 @@ export async function tournamentPage(app, id) {
             🚀 Lancer le tournoi
           </button>
           ${!canStart ? `<p class="muted small center">${!pow2
-            ? `Il faut 2, 4, 8, 16, 32 ou 64 persos (actuellement ${nChars}).`
+            ? `Il faut 2, 4, 8, 16, 32, 64 ou 128 persos (actuellement ${nChars}).`
             : 'Le tournoi se lance avec un nombre impair de votants (3, 5, 7…).'}</p>` : ''}
         ` : '<p class="muted small center">En attente du lancement par le créateur…</p>'}
       </section>`;
