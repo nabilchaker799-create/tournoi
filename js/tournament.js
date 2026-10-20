@@ -1,6 +1,6 @@
 import { sb, state, requireLogin } from './supabase.js';
 import {
-  $, $$, esc, errMsg, toast, carousel, bindCarousels, saveCarousels, restoreCarousels, thumb,
+  $, $$, esc, errMsg, toast, carousel, bindCarousels, saveCarousels, restoreCarousels, thumb, sortedImages,
 } from './components.js';
 
 const STATUS = { lobby: 'En attente', running: 'En direct', finished: 'Terminé' };
@@ -21,6 +21,8 @@ export async function tournamentPage(app, id) {
   let D = null;                 // données du tournoi
   let confettiDone = false;
   let busy = false;
+  let cur = 0;                  // index du duel affiché dans le round en cours
+  let shownRound = null;
 
   /* ============================== DONNÉES ============================== */
   async function load() {
@@ -75,7 +77,7 @@ export async function tournamentPage(app, id) {
     const pos = saveCarousels(app);
     const t = D.t;
 
-    app.innerHTML = `
+    const head = `
       <section class="t-head fade-up">
         <a href="#/" class="back">← Tournois</a>
         <div class="t-head-row">
@@ -86,12 +88,14 @@ export async function tournamentPage(app, id) {
         <h1 class="t-title">${esc(t.name)}</h1>
         <p class="muted">Créé par <b>${esc(t.creator?.username || '?')}</b> · ${D.seeds.length} persos · ${D.parts.length} votants</p>
         ${shareBox()}
-      </section>
+      </section>`;
+
+    app.innerHTML = `
+      ${t.status === 'running' ? runningHTML() : ''}
+      ${head}
 
       ${t.status === 'finished' ? winnerHTML() : ''}
       ${t.status === 'lobby' ? lobbyHTML() : ''}
-      ${t.status === 'running' ? runningHTML() : ''}
-
       ${t.status === 'finished' ? `
         <section class="block fade-up">
           <h2 class="section-title">🌳 Arbre du tournoi</h2>
@@ -107,14 +111,18 @@ export async function tournamentPage(app, id) {
 
       ${t.status === 'lobby' ? charsGridHTML() : ''}
 
-      ${isCreator() ? `
+      ${isCreator() || (state.session && t.status === 'finished') ? `
         <section class="block danger-zone">
           <button class="btn btn-danger btn-sm" data-action="delete">🗑 Supprimer le tournoi</button>
+          ${!isCreator() ? '<p class="muted small" style="margin-top:8px">Les tournois terminés peuvent être supprimés par tout le monde.</p>' : ''}
         </section>` : ''}
     `;
 
+    // Hauteur du header pour que l'arène prenne pile tout l'écran
+    document.documentElement.style.setProperty('--hdr', `${$('#top')?.offsetHeight || 57}px`);
     bindCarousels(app);
     restoreCarousels(app, pos);
+    bindArena();
 
     if (t.status === 'finished' && !confettiDone) {
       confettiDone = true;
@@ -197,79 +205,175 @@ export async function tournamentPage(app, id) {
   }
 
   /* ---------- EN COURS ---------- */
+  // Duels du round en cours
+  const roundMatches = () => D.matches.filter(m => m.round === D.t.current_round).sort((a, b) => a.position - b.position);
+
+  // Prochain duel à voter pour moi (ou le premier encore ouvert)
+  function pickDefault(ms, from = -1) {
+    const order = [...ms.keys()].map(k => (k + from + 1) % ms.length);
+    const todo = i => ms[i].status === 'open' && isParticipant() && !voteStats(ms[i]).mine;
+    let i = order.find(todo);
+    if (i == null) i = order.find(k => ms[k].status === 'open');
+    return i ?? 0;
+  }
+
+  function syncCur() {
+    const ms = roundMatches();
+    if (shownRound !== D.t.current_round) {
+      shownRound = D.t.current_round;
+      cur = pickDefault(ms);
+    }
+    cur = Math.min(Math.max(cur, 0), Math.max(ms.length - 1, 0));
+    return ms;
+  }
+
+  function navPillsHTML(ms) {
+    return ms.map((m, i) => {
+      const s = voteStats(m);
+      const cls = [
+        'npill',
+        i === cur ? 'on' : '',
+        m.status === 'closed' ? 'done' : s.mine ? 'mine' : 'todo',
+      ].join(' ');
+      const ico = m.status === 'closed' ? '✔' : s.mine ? '●' : '';
+      return `<button class="${cls}" data-action="goto" data-i="${i}" aria-label="Duel ${i + 1}">${i + 1}${ico ? `<i>${ico}</i>` : ''}</button>`;
+    }).join('');
+  }
+
+  /* ---------- ARÈNE (duel plein écran) ---------- */
+  function roundLabel(r) {
+    const left = D.seeds.length / 2 ** (r - 1);   // persos encore en lice
+    return left === 2 ? 'Finale' : `Tour de ${left}`;
+  }
+
+  function progressHTML() {
+    const R = totalRounds();
+    const segs = [];
+    for (let r = 1; r <= R; r++) {
+      const count = D.seeds.length / 2 ** r;
+      const ms = D.matches.filter(m => m.round === r);
+      const done = ms.filter(m => m.status === 'closed').length;
+      const pct = r < D.t.current_round ? 100 : r > D.t.current_round ? 0 : Math.round((done / count) * 100);
+      segs.push(`<span class="seg ${r === D.t.current_round ? 'now' : ''}" style="flex-grow:${Math.pow(count, 0.6).toFixed(2)}"><i style="width:${pct}%"></i></span>`);
+    }
+    return segs.join('');
+  }
+
   function runningHTML() {
     const r = D.t.current_round;
-    const ms = D.matches.filter(m => m.round === r);
-    const open = ms.filter(m => m.status === 'open').length;
+    const ms = syncCur();
+    const m = ms[cur];
+    if (!m) return '';
+    const myTodo = isParticipant() ? ms.filter(x => x.status === 'open' && !voteStats(x).mine).length : 0;
     return `
-      <section class="block">
-        <div class="section-row">
-          <h2 class="section-title">⚔️ ${roundName(r, totalRounds())}</h2>
-          <span class="chip">${ms.length - open}/${ms.length} duels terminés</span>
+      <section class="arena" data-arena>
+        <div class="arena-top">
+          <span class="ar-round">${roundLabel(r)}</span>
+          <div class="ar-progress" data-progress>${progressHTML()}</div>
+          <span class="ar-trophy">🏆</span>
+          <span class="ar-count">Duel <b>${cur + 1}</b>/${ms.length}</span>
         </div>
-        ${!isParticipant() ? `<p class="muted small">${state.session
-          ? 'Tu es spectateur : les inscriptions sont fermées pour ce tournoi.'
-          : '<a href="#/login" data-action="login">Connecte-toi</a> — tu regardes en spectateur.'}</p>` : ''}
-        <div class="matches">${ms.map(matchHTML).join('')}</div>
+
+        <div class="arena-stage ${m.status}">
+          ${halfHTML(m, m.character_a, 'a')}
+          <div class="ar-vs"><span>VS</span></div>
+          ${halfHTML(m, m.character_b, 'b')}
+        </div>
+
+        <div class="arena-bottom">
+          ${ms.length > 1 ? `
+            <div class="arena-nav">
+              <button class="nav-arrow" data-action="prev" ${cur <= 0 ? 'disabled' : ''} aria-label="Duel précédent">‹</button>
+              <div class="nav-pills" data-pills>${navPillsHTML(ms)}</div>
+              <button class="nav-arrow" data-action="next" ${cur >= ms.length - 1 ? 'disabled' : ''} aria-label="Duel suivant">›</button>
+            </div>` : ''}
+          <div class="arena-info">
+            <span class="nav-todo" data-todo>${myTodo ? `Il te reste <b>${myTodo}</b> vote${myTodo > 1 ? 's' : ''}` : isParticipant() ? '✔ Tu as voté partout' : ''}</span>
+            ${!isParticipant() ? `<span class="muted small">${state.session
+              ? '👀 Spectateur : les inscriptions sont fermées'
+              : '👀 Spectateur — <a href="#/login" data-action="login">connecte-toi</a>'}</span>` : ''}
+            <div class="ar-foot" data-foot="${m.id}">${footHTML(m)}</div>
+          </div>
+        </div>
       </section>`;
   }
 
-  // Bouton / étiquette sous chaque perso
-  function ctaHTML(m, cid) {
-    const s = voteStats(m);
-    if (m.status === 'closed') {
-      return m.winner_id === cid
-        ? '<span class="tag tag-win">👑 Qualifié</span>'
-        : '<span class="tag tag-out">Éliminé</span>';
+  function refreshNav() {
+    const ms = roundMatches();
+    const pills = $('[data-pills]', app);
+    if (pills) {
+      const sl = pills.scrollLeft;
+      pills.innerHTML = navPillsHTML(ms);
+      pills.scrollLeft = sl;
     }
-    if (s.mine === cid) return '<span class="tag tag-mine">✔ Ton vote</span>';
-    if (s.mine) return '';
-    if (isParticipant()) {
-      return `<button class="btn btn-vote" data-action="vote" data-match="${m.id}" data-char="${cid}">Voter</button>`;
+    const prog = $('[data-progress]', app);
+    if (prog) prog.innerHTML = progressHTML();
+    const todo = $('[data-todo]', app);
+    if (todo && isParticipant()) {
+      const n = ms.filter(m => m.status === 'open' && !voteStats(m).mine).length;
+      todo.innerHTML = n ? `Il te reste <b>${n}</b> vote${n > 1 ? 's' : ''}` : '✔ Tu as voté partout';
     }
-    return '<span class="tag tag-out">Spectateur</span>';
   }
 
-  function sideClass(m, cid) {
+  function goTo(i) {
+    const ms = roundMatches();
+    if (i < 0 || i >= ms.length || i === cur) return;
+    cur = i;
+    render();
+    $('.npill.on', app)?.scrollIntoView({ inline: 'center', block: 'nearest' });
+    $('.arena', app)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+
+  // Nom cliquable (= voter) + pourcentage
+  function ctaHTML(m, cid) {
+    const s = voteStats(m);
+    const c = D.chars.get(cid);
+    const name = esc(c?.name);
+    const reveal = !!s.mine || m.status === 'closed' || !isParticipant();
+    const mineVotes = cid === m.character_a ? s.a : s.b;
+    const pct = s.total ? Math.round((mineVotes / s.total) * 100) : 0;
+    const pctHTML = reveal ? `<span class="ar-pct">${pct}%<small>${mineVotes} vote${mineVotes > 1 ? 's' : ''}</small></span>` : '';
+
+    let btn;
+    if (m.status === 'closed') {
+      btn = m.winner_id === cid
+        ? `<span class="ar-name won">👑 ${name}</span>`
+        : `<span class="ar-name dim">${name}</span>`;
+    } else if (s.mine === cid) {
+      btn = `<span class="ar-name chosen">✔ ${name}</span>`;
+    } else if (s.mine || !isParticipant()) {
+      btn = `<span class="ar-name dim">${name}</span>`;
+    } else {
+      btn = `<button class="ar-name" data-action="vote" data-match="${m.id}" data-char="${cid}" title="Voter pour ${name}">${name}</button>`;
+    }
+    return btn + pctHTML;
+  }
+
+  function sideClass(m, cid, side) {
     const s = voteStats(m);
     return [
-      'side',
+      'half', `half-${side}`,
       m.winner_id === cid ? 'win' : '',
       m.winner_id && m.winner_id !== cid ? 'lose' : '',
       s.mine === cid ? 'picked' : '',
     ].join(' ');
   }
 
-  function sideHTML(m, cid, key) {
+  function halfHTML(m, cid, side) {
     const c = D.chars.get(cid);
+    const first = sortedImages(c)[0]?.url || '';
     return `
-      <div class="${sideClass(m, cid)}" data-side="${m.id}:${cid}">
-        <div class="side-media">
-          ${carousel(c, `${key}-${cid}`)}
-          ${m.winner_id === cid ? '<span class="crown">👑</span>' : ''}
-        </div>
-        <div class="side-body">
-          <div class="side-name" title="${esc(c?.name)}">${esc(c?.name)}</div>
-          <div class="side-uni">${esc(c?.universe)}</div>
-          <div class="side-cta" data-cta="${m.id}:${cid}">${ctaHTML(m, cid)}</div>
+      <div class="${sideClass(m, cid, side)}" data-side="${m.id}:${cid}" data-sidekey="${side}">
+        <div class="half-bg" data-bg="${esc(first)}"></div>
+        <div class="half-inner">
+          <div class="ar-card">
+            ${carousel(c, `ar-${m.id}-${cid}`)}
+            ${m.winner_id === cid ? '<span class="crown">👑</span>' : ''}
+          </div>
+          <div class="ar-cta" data-cta="${m.id}:${cid}">${ctaHTML(m, cid)}</div>
+          <div class="ar-uni">${esc(c?.universe)}</div>
         </div>
       </div>`;
-  }
-
-  function matchHTML(m, i) {
-    return `
-      <article class="match fade-up ${m.status}" style="animation-delay:${i * 60}ms" data-match="${m.id}">
-        <div class="match-head">
-          <span class="match-num">Duel ${m.position}</span>
-          ${m.status === 'open' ? '<span class="live-dot">EN COURS</span>' : '<span class="done-dot">TERMINÉ</span>'}
-        </div>
-        <div class="duel">
-          ${sideHTML(m, m.character_a, `m${m.round}-${m.position}`)}
-          ${sideHTML(m, m.character_b, `m${m.round}-${m.position}`)}
-          <div class="vs"><span>VS</span></div>
-        </div>
-        <div class="match-foot" data-foot="${m.id}">${footHTML(m)}</div>
-      </article>`;
   }
 
   function footHTML(m) {
@@ -277,21 +381,7 @@ export async function tournamentPage(app, id) {
     const n = D.parts.length;
     const a = D.chars.get(m.character_a);
     const b = D.chars.get(m.character_b);
-    const reveal = !!s.mine || m.status === 'closed' || !isParticipant();
-    const pa = s.total ? Math.round((s.a / s.total) * 100) : 50;
-
     let html = '';
-
-    if (reveal) {
-      html += `
-        <div class="bar-wrap">
-          <div class="bar-labels"><span>${s.total ? pa : 0}%</span><span>${s.total ? 100 - pa : 0}%</span></div>
-          <div class="bar">
-            <div class="bar-a" style="width:${pa}%"></div>
-            <div class="bar-b" style="width:${100 - pa}%"></div>
-          </div>
-        </div>`;
-    }
 
     if (m.status === 'open') {
       const pct = n ? Math.round((s.total / n) * 100) : 0;
@@ -316,8 +406,30 @@ export async function tournamentPage(app, id) {
             </div>
           </details>`;
       }
+    } else {
+      html += '<span class="done-dot">✔ DUEL TERMINÉ</span>';
     }
     return html;
+  }
+
+  // Fond flouté = image affichée dans le carrousel
+  function bindArena() {
+    $$('.half', app).forEach(h => {
+      const bg = $('.half-bg', h);
+      const setBg = url => { if (url) bg.style.backgroundImage = `url(${JSON.stringify(url)})`; };
+      setBg(bg.dataset.bg);
+      const track = $('.track', h);
+      if (!track) return;
+      let t = null;
+      track.addEventListener('scroll', () => {
+        clearTimeout(t);
+        t = setTimeout(() => {
+          const i = Math.round(track.scrollLeft / (track.clientWidth || 1));
+          const img = track.children[i]?.querySelector('img');
+          if (img) setBg(img.getAttribute('src'));
+        }, 80);
+      }, { passive: true });
+    });
   }
 
   /* ---------- VAINQUEUR ---------- */
@@ -402,11 +514,12 @@ export async function tournamentPage(app, id) {
       }
       for (const cid of [m.character_a, m.character_b]) {
         const side = $(`[data-side="${m.id}:${cid}"]`, app);
-        if (side) side.className = sideClass(m, cid);
+        if (side) side.className = sideClass(m, cid, side.dataset.sidekey);
         const cta = $(`[data-cta="${m.id}:${cid}"]`, app);
         if (cta) cta.innerHTML = ctaHTML(m, cid);
       }
     }
+    refreshNav();
     const br = $('.bracket-wrap', app);
     if (br) {
       const sl = br.scrollLeft;
@@ -489,6 +602,10 @@ export async function tournamentPage(app, id) {
       }, "C'est parti ! 🚀");
     }
 
+    if (a === 'prev') return goTo(cur - 1);
+    if (a === 'next') return goTo(cur + 1);
+    if (a === 'goto') return goTo(+el.dataset.i);
+
     if (a === 'vote') {
       $$(`[data-action="vote"][data-match="${el.dataset.match}"]`, app).forEach(b => { b.disabled = true; });
       el.classList.add('voting');
@@ -501,7 +618,17 @@ export async function tournamentPage(app, id) {
           throw error;
         }
         // Le temps réel met à jour, mais on recharge direct pour la réactivité
+        const roundBefore = D.t.current_round;
         await reload();
+        // Passe tout seul au prochain duel à voter
+        if (D.t.status === 'running' && D.t.current_round === roundBefore) {
+          const ms = roundMatches();
+          const left = ms.filter(m => m.status === 'open' && !voteStats(m).mine).length;
+          if (left) {
+            const nxt = pickDefault(ms, cur);
+            if (nxt !== cur) setTimeout(() => { if (D.t.current_round === roundBefore) goTo(nxt); }, 900);
+          }
+        }
       }, 'Vote enregistré ✔');
     }
 
@@ -517,9 +644,9 @@ export async function tournamentPage(app, id) {
     }
 
     if (a === 'delete') {
-      if (!confirm('Supprimer définitivement ce tournoi ?')) return;
+      if (!confirm('Supprimer définitivement ce tournoi pour tout le monde ?')) return;
       return act(async () => {
-        const { error } = await sb.from('tournaments').delete().eq('id', id);
+        const { error } = await sb.rpc('delete_tournament', { p_tournament: id });
         if (error) throw error;
         location.hash = '#/';
       }, 'Tournoi supprimé');
@@ -566,6 +693,13 @@ export async function tournamentPage(app, id) {
     .subscribe();
 
   // Filet de sécurité si le temps réel décroche (onglet en veille sur téléphone…)
+  const onKey = e => {
+    if (D?.t.status !== 'running' || e.target.closest('input, textarea, select')) return;
+    if (e.key === 'ArrowLeft') goTo(cur - 1);
+    if (e.key === 'ArrowRight') goTo(cur + 1);
+  };
+  document.addEventListener('keydown', onKey);
+
   const onVisible = () => { if (document.visibilityState === 'visible') schedule('full'); };
   document.addEventListener('visibilitychange', onVisible);
 
@@ -573,6 +707,7 @@ export async function tournamentPage(app, id) {
     clearTimeout(timer);
     app.removeEventListener('click', onClick);
     document.removeEventListener('visibilitychange', onVisible);
+    document.removeEventListener('keydown', onKey);
     sb.removeChannel(channel);
   };
 }
