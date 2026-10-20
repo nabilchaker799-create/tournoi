@@ -68,7 +68,11 @@ async function homePage(app) {
       list.innerHTML = `<p class="empty">Aucun tournoi ici pour l'instant.<br><a href="#/create">Lance le premier 🔥</a></p>`;
       return;
     }
-    list.innerHTML = data.map((t, i) => {
+    const canBulk = tab === 'finished' && state.session;
+    list.innerHTML = (canBulk ? `
+      <div class="bulk-row">
+        <button class="btn btn-sm btn-danger" id="delAllFinished">🗑 Supprimer tous les tournois terminés</button>
+      </div>` : '') + data.map((t, i) => {
       const nc = t.tournament_characters?.[0]?.count ?? 0;
       const np = t.tournament_participants?.[0]?.count ?? 0;
       return `
@@ -83,10 +87,36 @@ async function homePage(app) {
             <span>🥊 ${nc} persos</span>
             <span>🗳️ ${np} votants</span>
           </div>
-          <div class="t-foot">${timeAgo(t.created_at)}</div>
+          <div class="t-foot">
+            <span>${timeAgo(t.created_at)}</span>
+            ${canBulk ? `<button class="t-del" data-del="${t.id}" title="Supprimer ce tournoi">🗑</button>` : ''}
+          </div>
         </a>`;
     }).join('');
+
+    $('#delAllFinished')?.addEventListener('click', async () => {
+      if (!confirm(`Supprimer les ${data.length} tournoi(s) terminé(s) pour tout le monde ?`)) return;
+      if (!confirm('Sûr ? Ça ne peut pas être annulé.')) return;
+      const { data: n, error: e } = await sb.rpc('delete_finished_tournaments');
+      if (e) return toast(errMsg(e), 'error');
+      toast(`${n} tournoi(s) supprimé(s)`, 'success');
+      loadList();
+    });
   }
+
+  // Suppression d'un tournoi terminé depuis sa carte
+  $('#list').addEventListener('click', async e => {
+    const b = e.target.closest('[data-del]');
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm('Supprimer ce tournoi terminé pour tout le monde ?')) return;
+    b.disabled = true;
+    const { error: err } = await sb.rpc('delete_tournament', { p_tournament: b.dataset.del });
+    if (err) { b.disabled = false; return toast(errMsg(err), 'error'); }
+    toast('Tournoi supprimé', 'success');
+    b.closest('.t-card')?.remove();
+  });
 
   $$('.tabs button').forEach(b => b.addEventListener('click', () => {
     tab = b.dataset.tab;
